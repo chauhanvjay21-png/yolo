@@ -10,18 +10,39 @@ import threading
 import time
 from collections import defaultdict
 
+# ============================================================
+# 🔧 FIX: Patch torch.load to use weights_only=False
+# This must run BEFORE importing torch or ultralytics
+# ============================================================
+import torch
+
+# Save original load function
+_original_torch_load = torch.load
+
+def _patched_torch_load(*args, **kwargs):
+    # Force weights_only=False for YOLO model loading
+    kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+
+# Apply the patch
+torch.load = _patched_torch_load
+
+# ============================================================
+# Now import the rest normally
+# ============================================================
+
 app = FastAPI()
 
 # Enable CORS for your frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your frontend URL
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load YOLO model (using nano for speed; use larger model for better accuracy)
+# Load YOLO model (now works with patched torch.load)
 model = YOLO("yolov8n.pt")
 
 # Connection manager
@@ -59,7 +80,6 @@ async def websocket_endpoint(websocket: WebSocket):
     print(f"Client connected. Total connections: {len(manager.active_connections)}")
     try:
         while True:
-            # Receive frame as base64 string
             data = await websocket.receive_text()
             try:
                 payload = json.loads(data)
@@ -67,7 +87,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not frame_data:
                     continue
 
-                # Decode base64 to image
                 img_bytes = base64.b64decode(frame_data)
                 np_arr = np.frombuffer(img_bytes, np.uint8)
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -75,13 +94,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 if frame is None:
                     continue
 
-                # Run YOLO inference
                 results = model(frame, conf=0.25, verbose=False)
-
-                # Annotate frame
                 annotated_frame = results[0].plot()
 
-                # Extract detection data
                 detections = []
                 if results[0].boxes is not None:
                     for box in results[0].boxes:
@@ -96,14 +111,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         detection_stats["class_counts"][class_name] += 1
                         detection_stats["total_detections"] += 1
 
-                # Keep recent detections limited
                 detection_stats["recent_detections"] = detections[-20:]
 
-                # Encode annotated frame to JPEG
                 _, jpeg = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 jpeg_base64 = base64.b64encode(jpeg.tobytes()).decode('utf-8')
 
-                # Send response
                 response = {
                     "type": "detection",
                     "frame": jpeg_base64,
